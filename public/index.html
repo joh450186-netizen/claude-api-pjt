@@ -17,16 +17,15 @@
   #status { margin-top: 12px; color: #666; }
   table { width: 100%; border-collapse: collapse; margin-top: 16px; }
   th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #ddd; }
-  .bar { height: 8px; background: #4a90d9; border-radius: 4px; }
   #recommendBtn { padding: 8px 16px; cursor: pointer; }
   .recipe-card { border: 1px solid #ddd; border-radius: 6px; padding: 12px; margin-top: 10px; }
   .recipe-card h3 { margin: 0 0 4px; font-size: 16px; }
-  .recipe-card .similarity { color: #4a90d9; font-size: 12px; }
+  .recipe-card .ingredients { color: #4a90d9; font-size: 12px; }
 </style>
 </head>
 <body>
 <h1>냉장고 재료 인식 테스트</h1>
-<p style="color:#666">이미지 URL을 입력하거나 파일을 업로드하면 <code>nvidia/llama-nemotron-rerank-vl-1b-v2:free</code> 모델로 재료 후보 12개와 비교해 관련도 점수를 보여줍니다.</p>
+<p style="color:#666">이미지 URL을 입력하거나 파일을 업로드하면 비전 AI 모델이 사진 속 식재료를 자유롭게 인식하고, 인식된 재료로 생성 AI 모델이 새 레시피를 만들어줍니다.</p>
 
 <div class="tabs">
   <button id="tabUrl" class="active">이미지 URL</button>
@@ -44,7 +43,7 @@
 <button id="submitBtn">인식하기</button>
 <div id="status"></div>
 <table id="resultTable" style="display:none">
-  <thead><tr><th>재료</th><th>카테고리</th><th>관련도 점수</th></tr></thead>
+  <thead><tr><th>재료</th><th>카테고리</th></tr></thead>
   <tbody id="resultBody"></tbody>
 </table>
 
@@ -123,7 +122,7 @@
     recommendBtn.style.display = 'none';
     recipeList.innerHTML = '';
     recommendStatus.textContent = '';
-    statusEl.textContent = '인식 중... (재료 12개 x 순차 API 호출, 수 초~수십 초 소요)';
+    statusEl.textContent = '인식 중... (비전 AI 모델 호출, 수 초 소요)';
 
     try {
       const res = await fetch('/api/inventory/recognize', {
@@ -140,17 +139,9 @@
 
       statusEl.textContent = '완료';
       resultBody.innerHTML = '';
-      const maxScore = Math.max(...data.recognizedIngredients.map((i) => i.score), 0.0001);
       for (const item of data.recognizedIngredients) {
         const tr = document.createElement('tr');
-        const pct = Math.round((item.score / maxScore) * 100);
-        tr.innerHTML = `
-          <td>${item.name}</td>
-          <td>${item.category}</td>
-          <td>
-            <div class="bar" style="width:${pct}%"></div>
-            <small>${item.score.toFixed(5)}</small>
-          </td>`;
+        tr.innerHTML = `<td>${item.name}</td><td>${item.category || ''}</td>`;
         resultBody.appendChild(tr);
       }
       resultTable.style.display = '';
@@ -163,7 +154,7 @@
 
   recommendBtn.onclick = async () => {
     recipeList.innerHTML = '';
-    recommendStatus.textContent = '레시피 검색 중...';
+    recommendStatus.textContent = '레시피 생성 중...';
 
     try {
       const res = await fetch('/api/recipes/recommend', {
@@ -184,7 +175,7 @@
         card.className = 'recipe-card';
         card.innerHTML = `
           <h3>${recipe.title}</h3>
-          <div class="similarity">유사도 ${recipe.similarity.toFixed(3)}</div>
+          <div class="ingredients">${(recipe.ingredients || []).join(', ')}</div>
           <p>${recipe.instructions}</p>`;
         recipeList.appendChild(card);
       }

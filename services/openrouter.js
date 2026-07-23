@@ -1,63 +1,82 @@
 const { openRouterApiKey } = require('../config');
 
-const RERANK_URL = 'https://openrouter.ai/api/v1/rerank';
-const RERANK_MODEL = 'nvidia/llama-nemotron-rerank-vl-1b-v2:free';
-const EMBEDDINGS_URL = 'https://openrouter.ai/api/v1/embeddings';
-const EMBEDDING_MODEL = 'nvidia/nemotron-3-embed-1b:free';
+const CHAT_URL = 'https://openrouter.ai/api/v1/chat/completions';
+const VISION_MODEL = 'nvidia/nemotron-nano-12b-v2-vl:free';
+const RECIPE_MODEL = 'openai/gpt-oss-20b:free';
 
-async function embedText(text) {
-  const response = await fetch(EMBEDDINGS_URL, {
+function extractJson(text) {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = fenced ? fenced[1] : text;
+  const start = candidate.search(/[[{]/);
+  const closeChar = candidate[start] === '[' ? ']' : '}';
+  const end = candidate.lastIndexOf(closeChar);
+
+  if (start === -1 || end === -1) {
+    throw new Error(`모델 응답에서 JSON을 찾을 수 없습니다: ${text.slice(0, 200)}`);
+  }
+
+  return JSON.parse(candidate.slice(start, end + 1));
+}
+
+async function chatCompletion(model, messages, maxTokens) {
+  const response = await fetch(CHAT_URL, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${openRouterApiKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ model: EMBEDDING_MODEL, input: text }),
+    body: JSON.stringify({ model, messages, max_tokens: maxTokens }),
   });
 
   const body = await response.json();
   if (!response.ok) {
-    throw new Error(body.error?.message || `OpenRouter embeddings failed (${response.status})`);
+    throw new Error(body.error?.message || `OpenRouter 요청 실패 (${response.status})`);
   }
 
-  return body.data[0].embedding;
+  return body.choices[0].message.content;
 }
 
-async function scoreIngredientAgainstImage(ingredientName, imageUrl) {
-  const response = await fetch(RERANK_URL, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${openRouterApiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: RERANK_MODEL,
-      query: ingredientName,
-      documents: [{ image: imageUrl }],
-    }),
-  });
+async function recognizeIngredients(imageUrl) {
+  const content = await chatCompletion(
+    VISION_MODEL,
+    [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text:
+              '이 사진 속에서 실제로 보이는 식재료만 한국어로 나열해줘. 사전에 없는 재료라도 보이는 대로 자유롭게 적어도 된다. ' +
+              '반드시 아래 JSON 배열 형식으로만 답하고 다른 설명은 붙이지 마: ' +
+              '[{"name": "재료명", "category": "카테고리"}]',
+          },
+          { type: 'image_url', image_url: { url: imageUrl } },
+        ],
+      },
+    ],
+    500
+  );
 
-  const body = await response.json();
-  if (!response.ok) {
-    throw new Error(body.error?.message || `OpenRouter rerank failed (${response.status})`);
-  }
-
-  return body.results[0].relevance_score;
+  return extractJson(content);
 }
 
-async function mapWithConcurrency(items, concurrency, fn) {
-  const results = new Array(items.length);
-  let nextIndex = 0;
+async function generateRecipes(ingredients) {
+  const content = await chatCompletion(
+    RECIPE_MODEL,
+    [
+      {
+        role: 'user',
+        content:
+          `다음 재료로 만들 수 있는 요리를 3가지 새로 만들어서 추천해줘: ${ingredients.join(', ')}. ` +
+          '기존에 존재하는 레시피를 검색하는 게 아니라 직접 창작해도 된다. ' +
+          '반드시 아래 JSON 배열 형식으로만 답하고 다른 설명은 붙이지 마: ' +
+          '[{"title": "요리명", "ingredients": ["재료1", "재료2"], "instructions": "조리법"}]',
+      },
+    ],
+    800
+  );
 
-  async function worker() {
-    while (nextIndex < items.length) {
-      const currentIndex = nextIndex++;
-      results[currentIndex] = await fn(items[currentIndex], currentIndex);
-    }
-  }
-
-  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
-  return results;
+  return extractJson(content);
 }
 
-module.exports = { scoreIngredientAgainstImage, embedText, mapWithConcurrency };
+module.exports = { recognizeIngredients, generateRecipes };

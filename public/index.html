@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>냉장고 재료 인식 테스트</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; color: #222; }
+  h1 { font-size: 20px; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 12px; }
+  .tabs button { padding: 6px 12px; cursor: pointer; }
+  .tabs button.active { background: #222; color: #fff; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+  input[type="text"] { width: 100%; padding: 8px; box-sizing: border-box; }
+  #submitBtn { margin-top: 12px; padding: 8px 16px; cursor: pointer; }
+  #preview { max-width: 100%; margin-top: 12px; border-radius: 6px; display: none; }
+  #status { margin-top: 12px; color: #666; }
+  table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #ddd; }
+  .bar { height: 8px; background: #4a90d9; border-radius: 4px; }
+  #recommendBtn { padding: 8px 16px; cursor: pointer; }
+  .recipe-card { border: 1px solid #ddd; border-radius: 6px; padding: 12px; margin-top: 10px; }
+  .recipe-card h3 { margin: 0 0 4px; font-size: 16px; }
+  .recipe-card .similarity { color: #4a90d9; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>냉장고 재료 인식 테스트</h1>
+<p style="color:#666">이미지 URL을 입력하거나 파일을 업로드하면 <code>nvidia/llama-nemotron-rerank-vl-1b-v2:free</code> 모델로 재료 후보 12개와 비교해 관련도 점수를 보여줍니다.</p>
+
+<div class="tabs">
+  <button id="tabUrl" class="active">이미지 URL</button>
+  <button id="tabFile">파일 업로드</button>
+</div>
+
+<div id="panelUrl" class="panel active">
+  <input type="text" id="imageUrlInput" placeholder="https://... 냉장고 사진 URL">
+</div>
+<div id="panelFile" class="panel">
+  <input type="file" id="imageFileInput" accept="image/*">
+</div>
+
+<img id="preview" alt="미리보기">
+<button id="submitBtn">인식하기</button>
+<div id="status"></div>
+<table id="resultTable" style="display:none">
+  <thead><tr><th>재료</th><th>카테고리</th><th>관련도 점수</th></tr></thead>
+  <tbody id="resultBody"></tbody>
+</table>
+
+<button id="recommendBtn" style="display:none; margin-top:16px;">이 재료로 레시피 추천받기</button>
+<div id="recommendStatus"></div>
+<div id="recipeList"></div>
+
+<script>
+  const tabUrl = document.getElementById('tabUrl');
+  const tabFile = document.getElementById('tabFile');
+  const panelUrl = document.getElementById('panelUrl');
+  const panelFile = document.getElementById('panelFile');
+  const imageUrlInput = document.getElementById('imageUrlInput');
+  const imageFileInput = document.getElementById('imageFileInput');
+  const preview = document.getElementById('preview');
+  const statusEl = document.getElementById('status');
+  const resultTable = document.getElementById('resultTable');
+  const resultBody = document.getElementById('resultBody');
+  const recommendBtn = document.getElementById('recommendBtn');
+  const recommendStatus = document.getElementById('recommendStatus');
+  const recipeList = document.getElementById('recipeList');
+
+  let recognizedNames = [];
+  let activeTab = 'url';
+
+  tabUrl.onclick = () => setTab('url');
+  tabFile.onclick = () => setTab('file');
+
+  function setTab(tab) {
+    activeTab = tab;
+    tabUrl.classList.toggle('active', tab === 'url');
+    tabFile.classList.toggle('active', tab === 'file');
+    panelUrl.classList.toggle('active', tab === 'url');
+    panelFile.classList.toggle('active', tab === 'file');
+  }
+
+  imageUrlInput.oninput = () => {
+    if (imageUrlInput.value) {
+      preview.src = imageUrlInput.value;
+      preview.style.display = 'block';
+    }
+  };
+
+  imageFileInput.onchange = () => {
+    const file = imageFileInput.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      preview.src = reader.result;
+      preview.style.display = 'block';
+    };
+    reader.readAsDataURL(file);
+  };
+
+  async function getImageUrl() {
+    if (activeTab === 'url') {
+      return imageUrlInput.value.trim();
+    }
+    const file = imageFileInput.files[0];
+    if (!file) return '';
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.readAsDataURL(file);
+    });
+  }
+
+  document.getElementById('submitBtn').onclick = async () => {
+    const imageUrl = await getImageUrl();
+    if (!imageUrl) {
+      statusEl.textContent = '이미지 URL을 입력하거나 파일을 선택하세요.';
+      return;
+    }
+
+    resultTable.style.display = 'none';
+    recommendBtn.style.display = 'none';
+    recipeList.innerHTML = '';
+    recommendStatus.textContent = '';
+    statusEl.textContent = '인식 중... (재료 12개 x 순차 API 호출, 수 초~수십 초 소요)';
+
+    try {
+      const res = await fetch('/api/inventory/recognize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageUrl }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        statusEl.textContent = '에러: ' + (data.error || res.status);
+        return;
+      }
+
+      statusEl.textContent = '완료';
+      resultBody.innerHTML = '';
+      const maxScore = Math.max(...data.recognizedIngredients.map((i) => i.score), 0.0001);
+      for (const item of data.recognizedIngredients) {
+        const tr = document.createElement('tr');
+        const pct = Math.round((item.score / maxScore) * 100);
+        tr.innerHTML = `
+          <td>${item.name}</td>
+          <td>${item.category}</td>
+          <td>
+            <div class="bar" style="width:${pct}%"></div>
+            <small>${item.score.toFixed(5)}</small>
+          </td>`;
+        resultBody.appendChild(tr);
+      }
+      resultTable.style.display = '';
+      recognizedNames = data.recognizedIngredients.map((i) => i.name);
+      recommendBtn.style.display = '';
+    } catch (err) {
+      statusEl.textContent = '요청 실패: ' + err.message;
+    }
+  };
+
+  recommendBtn.onclick = async () => {
+    recipeList.innerHTML = '';
+    recommendStatus.textContent = '레시피 검색 중...';
+
+    try {
+      const res = await fetch('/api/recipes/recommend', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ingredients: recognizedNames }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        recommendStatus.textContent = '에러: ' + (data.error || res.status);
+        return;
+      }
+
+      recommendStatus.textContent = `추천 재료: ${recognizedNames.join(', ')}`;
+      for (const recipe of data.recommendations) {
+        const card = document.createElement('div');
+        card.className = 'recipe-card';
+        card.innerHTML = `
+          <h3>${recipe.title}</h3>
+          <div class="similarity">유사도 ${recipe.similarity.toFixed(3)}</div>
+          <p>${recipe.instructions}</p>`;
+        recipeList.appendChild(card);
+      }
+    } catch (err) {
+      recommendStatus.textContent = '요청 실패: ' + err.message;
+    }
+  };
+</script>
+</body>
+</html>

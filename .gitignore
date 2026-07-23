@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+
+node_modules/
+dist/
+build/
+*.log
+
+.claude/settings.local.json
+data/recipeEmbeddings.json
